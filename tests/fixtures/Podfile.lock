@@ -1,0 +1,12 @@
+PODS:
+  - AFNetworking (2.5.0):
+    - AFNetworking/NSURLSession (= 2.5.0)
+  - AFNetworking/NSURLSession (2.5.0)
+  - "Firebase/Core (10.0.0)":
+    - FirebaseCore (= 10.0.0)
+  - FirebaseCore (10.0.0)
+
+DEPENDENCIES:
+  - AFNetworking (= 2.5.0)
+
+COCOAPODS: 1.15.2

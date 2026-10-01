@@ -1,0 +1,31 @@
+name: "cra-scan"
+description: "SBOM + exploited-vulnerability check for Swift / Apple-platform projects (EU Cyber Resilience Act)"
+branding: {icon: "shield", color: "blue"}
+inputs:
+  path:        {description: "Project directory or lockfile", default: "."}
+  product:     {description: "Product name for the SBOM", default: ""}
+  version:     {description: "Product version for the SBOM", default: ""}
+  supplier:    {description: "Supplier / company name", default: ""}
+  fail-on:     {description: "exploited | high | known | never", default: "exploited"}
+  sbom-file:   {description: "Where to write the CycloneDX SBOM", default: "sbom.cdx.json"}
+outputs:
+  worst: {description: "Highest finding level (none|known|high|exploited)", value: "${{ steps.scan.outputs.worst }}"}
+runs:
+  using: "composite"
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}
+      run: |
+        set +e
+        args=(scan "${{ inputs.path }}" -o "${{ inputs.sbom-file }}" --format markdown --fail-on "${{ inputs.fail-on }}")
+        [ -n "${{ inputs.product }}" ]  && args+=(--product "${{ inputs.product }}")
+        [ -n "${{ inputs.version }}" ]  && args+=(--product-version "${{ inputs.version }}")
+        [ -n "${{ inputs.supplier }}" ] && args+=(--supplier "${{ inputs.supplier }}")
+        python3 -m cra_scan "${args[@]}" | tee cra-scan-report.md
+        code=${PIPESTATUS[0]}
+        cat cra-scan-report.md >> "$GITHUB_STEP_SUMMARY"
+        worst=$(grep -o 'worst level: \*\*[a-z]*' cra-scan-report.md | sed 's/.*\*\*//')
+        echo "worst=${worst:-none}" >> "$GITHUB_OUTPUT"
+        exit $code

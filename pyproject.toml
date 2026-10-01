@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cra-scan"
+version = "0.1.0"
+description = "SBOM and exploited-vulnerability check for Swift / Apple-platform projects, for EU Cyber Resilience Act reporting"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [{name = "Georgios Stavropoulos"}]
+dependencies = []
+
+[project.scripts]
+cra-scan = "cra_scan.cli:main"
+
+[tool.setuptools]
+packages = ["cra_scan"]

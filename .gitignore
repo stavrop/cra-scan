@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+sbom.cdx.json
+cra-scan-report.md
+.venv/
+dist/
+*.egg-info/
+.DS_Store

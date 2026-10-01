@@ -1,0 +1,11 @@
+{
+  "originHash": "x",
+  "pins": [
+    {"identity": "purchases-ios", "kind": "remoteSourceControl", "location": "https://github.com/RevenueCat/purchases-ios.git",
+     "state": {"revision": "1111", "version": "5.1.0"}},
+    {"identity": "local-pkg", "kind": "localSourceControl", "location": "/Users/me/pkg", "state": {"revision": "2222"}},
+    {"identity": "swift-collections", "kind": "remoteSourceControl", "location": "https://github.com/apple/swift-collections",
+     "state": {"branch": "main", "revision": "3333"}}
+  ],
+  "version": 3
+}
