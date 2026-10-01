@@ -4,14 +4,21 @@
   * CISA KEV           — known exploited vulnerabilities (CVE ids)
   * ENISA EUVD         — EU vulnerability database, exploited flag (CVE/GHSA aliases)
   * FIRST EPSS         — probability of exploitation in the next 30 days
+  * CocoaPods CDN      — podspecs, to map each pod to its source repository
+  * NVD (CPE match)    — CVEs for CocoaPods pods, matched by product name and version
 
-KEV and EUVD lists are cached on disk (default 12 h) so CI runs stay fast.
+KEV and EUVD lists are cached on disk (default 12 h) so CI runs stay fast. Podspecs are cached
+for 30 days and NVD answers for 24 h. Set NVD_API_KEY to raise NVD's rate limit (5 → 50 requests / 30 s).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Dict, Iterable, List, Optional, Set
@@ -24,6 +31,8 @@ OSV_VULN = "https://api.osv.dev/v1/vulns/"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 EUVD_SEARCH = "https://euvdservices.enisa.europa.eu/api/search"
 EPSS_URL = "https://api.first.org/data/v1/epss"
+POD_CDN = "https://cdn.cocoapods.org/Specs/"
+NVD_CVES = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 
 def cache_dir() -> str:
@@ -32,10 +41,11 @@ def cache_dir() -> str:
     return d
 
 
-def _http(url: str, data: Optional[dict] = None, timeout: int = 30):
+def _http(url: str, data: Optional[dict] = None, timeout: int = 30, headers: Optional[dict] = None):
     body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(url, data=body, headers={"User-Agent": UA, "Accept": "application/json",
-                                                          **({"Content-Type": "application/json"} if body else {})})
+                                                          **({"Content-Type": "application/json"} if body else {}),
+                                                          **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -55,14 +65,15 @@ def _cached(name: str, max_age_h: float, loader):
 
 # --------------------------------------------------------------------------- OSV
 def osv_query(components: List[Dict]) -> Dict[str, List[str]]:
-    """Return {purl: [vuln ids]} for components OSV can match (SwiftURL today)."""
+    """Return {purl: [vuln ids]} for components OSV can match: Swift packages, and pods whose
+    source repository is known (a pod and a Swift package often share a GitHub repo and tags)."""
     queries, purls = [], []
     for c in components:
-        if c["ecosystem"] != "SwiftURL" or not c.get("source_url"):
+        if c["ecosystem"] not in ("SwiftURL", "CocoaPods") or not c.get("source_url"):
             continue
         if c.get("version"):
             q = {"package": {"ecosystem": "SwiftURL", "name": c["source_url"]}, "version": c["version"]}
-        elif c.get("revision"):
+        elif c.get("revision") and c["ecosystem"] == "SwiftURL":
             q = {"commit": c["revision"]}
         else:
             continue
@@ -117,3 +128,69 @@ def epss(cves: Iterable[str]) -> Dict[str, float]:
         for row in d.get("data", []):
             out[row["cve"]] = float(row["epss"])
     return out
+
+
+# --------------------------------------------------------------------------- CocoaPods
+def pod_spec(name: str, version: str) -> Dict:
+    """Podspec JSON from the CocoaPods CDN ({} if unavailable). Sharded by md5 of the pod name."""
+    h = hashlib.md5(name.encode("utf-8")).hexdigest()
+    url = f"{POD_CDN}{h[0]}/{h[1]}/{h[2]}/{urllib.parse.quote(name)}/{urllib.parse.quote(version)}/{urllib.parse.quote(name)}.podspec.json"
+
+    def load():
+        try:
+            return _http(url, timeout=20)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return {}
+            raise
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{name}@{version}")
+    return _cached(f"pod-{safe}.json", 24 * 30, load)
+
+
+# --------------------------------------------------------------------------- NVD
+_last_nvd = [0.0]
+
+
+def nvd_by_cpe(product: str, version: str) -> List[Dict]:
+    """CVEs whose NVD configuration matches cpe:2.3:a:*:<product>:<version> (range-aware)."""
+    key = os.environ.get("NVD_API_KEY") or os.environ.get("CRA_SCAN_NVD_API_KEY")
+
+    def load():
+        gap = 0.7 if key else 6.5          # NVD public limits: 5 req/30 s without a key, 50 with one
+        wait = _last_nvd[0] + gap - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        cpe = f"cpe:2.3:a:*:{product}:{version}"
+        q = urllib.parse.urlencode({"virtualMatchString": cpe, "resultsPerPage": 200})
+        try:
+            d = _http(f"{NVD_CVES}?{q}", timeout=60, headers={"apiKey": key} if key else None)
+        finally:
+            _last_nvd[0] = time.time()
+        out = []
+        for v in d.get("vulnerabilities", []):
+            c = v.get("cve", {})
+            out.append({
+                "id": c.get("id"),
+                "summary": next((x["value"] for x in c.get("descriptions", []) if x.get("lang") == "en"), ""),
+                "cvss": _nvd_score(c.get("metrics", {})),
+                "matches": [m for conf in c.get("configurations", []) for n in conf.get("nodes", [])
+                            for m in n.get("cpeMatch", []) if m.get("vulnerable")
+                            and m.get("criteria", "").split(":")[4:5] == [product]],
+            })
+        return out
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{product}@{version}")
+    return _cached(f"nvd-{safe}.json", 24, load)
+
+
+def _nvd_score(metrics: Dict):
+    for k in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+        for m in metrics.get(k, []):
+            s = m.get("cvssData", {}).get("baseScore")
+            if s is not None:
+                return float(s)
+    return None
+
+
+def progress(msg: str):
+    if sys.stderr.isatty() or os.environ.get("CRA_SCAN_VERBOSE"):
+        print(msg, file=sys.stderr, flush=True)

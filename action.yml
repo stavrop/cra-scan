@@ -8,15 +8,23 @@ inputs:
   supplier:    {description: "Supplier / company name", default: ""}
   fail-on:     {description: "exploited | high | known | never", default: "exploited"}
   sbom-file:   {description: "Where to write the CycloneDX SBOM", default: "sbom.cdx.json"}
+  nvd-api-key: {description: "Optional NVD API key (faster CocoaPods checks); pass a secret", default: ""}
 outputs:
   worst: {description: "Highest finding level (none|known|high|exploited)", value: "${{ steps.scan.outputs.worst }}"}
 runs:
   using: "composite"
   steps:
+    - uses: actions/cache@v4            # podspecs and NVD answers: makes repeat CocoaPods scans fast
+      with:
+        path: ${{ runner.temp }}/cra-scan-cache
+        key: cra-scan-${{ hashFiles('**/Podfile.lock', '**/Package.resolved') }}-${{ github.run_id }}
+        restore-keys: cra-scan-
     - id: scan
       shell: bash
       env:
         PYTHONPATH: ${{ github.action_path }}
+        CRA_SCAN_CACHE: ${{ runner.temp }}/cra-scan-cache
+        NVD_API_KEY: ${{ inputs.nvd-api-key }}
       run: |
         set +e
         args=(scan "${{ inputs.path }}" -o "${{ inputs.sbom-file }}" --format markdown --fail-on "${{ inputs.fail-on }}")

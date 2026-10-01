@@ -6,13 +6,18 @@ Levels (highest first):
                Art. 14 reporting clock (24h early warning / 72h notification).
   high       — EPSS >= 0.10 (10% chance of exploitation in 30 days) or CVSS >= 9.0
   known      — any other published advisory for the pinned version
+
+CocoaPods pods have no advisory feed of their own. cra-scan maps each pod to its source repo via its
+podspec (then checks OSV as for Swift packages) and asks NVD for CVEs whose CPE names the pod. A CVE
+matched only by product name (the CPE vendor is not the pod's GitHub owner) is reported with
+"verify": true and capped at "known", so a name collision never fails a build.
 """
 from __future__ import annotations
 
 import re
 from typing import Dict, List
 
-from . import feeds
+from . import feeds, lockfiles
 
 LEVELS = ["none", "known", "high", "exploited"]
 
@@ -60,10 +65,80 @@ def _next_fix(current, fixed: List[str]):
     return [min(above, key=_vkey)] if above else []
 
 
-def check(components: List[Dict], use_epss: bool = True) -> Dict:
+_REPO_HOSTS = ("github.com/", "gitlab.com/", "bitbucket.org/")
+
+
+def resolve_pods(components: List[Dict]) -> int:
+    """Fill source_url for CocoaPods components from their podspecs. Returns how many were resolved."""
+    n = 0
+    for c in components:
+        if c["ecosystem"] != "CocoaPods" or c.get("source_url") or not c.get("version"):
+            continue
+        spec = feeds.pod_spec(c["name"], c["version"])
+        src = spec.get("source") or {}
+        for cand in (src.get("git"), spec.get("homepage")):
+            u = lockfiles.normalise_git_url(cand) if cand else ""
+            if u.count("/") < 2:
+                continue
+            c.setdefault("repo", u)                     # any host: used to recognise the CPE vendor
+            if u.startswith(_REPO_HOSTS) and u.count("/") == 2:
+                c["source_url"] = u                     # GitHub-style: also queried in OSV
+                n += 1
+                break
+    return n
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _pod_products(c: Dict) -> List[str]:
+    names = {c["name"].lower()}
+    for u in (c.get("source_url"), c.get("repo")):
+        if u:
+            names.add(u.rstrip("/").rsplit("/", 1)[-1].lower())
+    out = set()
+    for n in names:
+        out.add(n)
+        out.add(n.replace("-", "_"))
+    return sorted(x for x in out if re.fullmatch(r"[a-z0-9._-]+", x))
+
+
+def _nvd_findings(c: Dict, known_cves: set) -> List[Dict]:
+    trusted = set()
+    for base in {c["name"]} | {u.rstrip("/").rsplit("/", 1)[-1] for u in (c.get("source_url"), c.get("repo")) if u}:
+        trusted |= {_norm(base), _norm(base) + "project"}
+    for u in (c.get("source_url"), c.get("repo")):
+        parts = (u or "").split("/")
+        if len(parts) >= 3:          # owner / organisation in the repo path, e.g. webm in .../webm/libwebp
+            trusted |= {_norm(parts[-2]), _norm(parts[-2]) + "project"}
+    trusted -= {"", "project"}
+    out, seen = [], set()
+    for product in _pod_products(c):
+        for cve in feeds.nvd_by_cpe(product, c["version"]):
+            if not cve["id"] or cve["id"] in seen or cve["id"] in known_cves:
+                continue
+            seen.add(cve["id"])
+            vendors = {m["criteria"].split(":")[3] for m in cve["matches"] if m.get("criteria")}
+            fixed = sorted({m["versionEndExcluding"] for m in cve["matches"] if m.get("versionEndExcluding")}, key=_vkey)
+            out.append({
+                "purl": c["purl"], "component": c["name"], "version": c["version"],
+                "id": cve["id"], "aliases": [], "cves": [cve["id"]],
+                "summary": (cve["summary"] or "")[:160], "cvss": cve["cvss"],
+                "fixed": _next_fix(c["version"], fixed),
+                "source": "nvd-cpe", "cpe_vendor": ", ".join(sorted(vendors)),
+                "verify": not any(_norm(v) in trusted for v in vendors),
+                "url": f"https://nvd.nist.gov/vuln/detail/{cve['id']}",
+            })
+    return out
+
+
+def check(components: List[Dict], use_epss: bool = True, use_nvd: bool = True) -> Dict:
+    pods = [c for c in components if c["ecosystem"] == "CocoaPods" and c.get("version")]
+    if pods:
+        feeds.progress(f"cra-scan: resolving {len(pods)} pod(s) to their source repositories…")
+        resolve_pods(pods)
     matches = feeds.osv_query(components)
-    kev = feeds.kev_cves() if matches else set()
-    euvd = feeds.euvd_exploited() if matches else {}
     by_purl = {c["purl"]: c for c in components}
 
     findings = []
@@ -88,15 +163,30 @@ def check(components: List[Dict], use_epss: bool = True) -> Dict:
                 "summary": d.get("summary") or (d.get("details") or "")[:160],
                 "cvss": score,
                 "fixed": _next_fix(by_purl[purl].get("version"), _fixed_versions(d)),
-                "kev": any(c in kev for c in cves),
-                "euvd": next((euvd[a] for a in aliases if a in euvd), None),
+                "source": "osv", "verify": False,
                 "url": f"https://osv.dev/vulnerability/{vid}",
             })
+
+    if use_nvd and pods:
+        feeds.progress(f"cra-scan: checking {len(pods)} pod(s) against NVD (cached for 24 h; set NVD_API_KEY to go faster)…")
+        for c in pods:
+            known = {cve for f in findings if f["purl"] == c["purl"] for cve in f["cves"]}
+            for f in _nvd_findings(c, known):
+                findings.append(f)
+                all_cves.update(f["cves"])
+
+    kev = feeds.kev_cves() if findings else set()
+    euvd = feeds.euvd_exploited() if findings else {}
+    for f in findings:
+        f["kev"] = any(c in kev for c in f["cves"])
+        f["euvd"] = next((euvd[a] for a in [f["id"]] + f["aliases"] if a in euvd), None)
 
     scores = feeds.epss(all_cves) if (use_epss and all_cves) else {}
     for f in findings:
         f["epss"] = max((scores.get(c, 0.0) for c in f["cves"]), default=None) if f["cves"] else None
-        if f["kev"] or f["euvd"]:
+        if f["verify"]:
+            f["level"] = "known"          # name-only CPE match: report, never fail the build on it
+        elif f["kev"] or f["euvd"]:
             f["level"] = "exploited"
         elif (f["epss"] or 0) >= 0.10 or (f["cvss"] or 0) >= 9.0:
             f["level"] = "high"
@@ -104,11 +194,16 @@ def check(components: List[Dict], use_epss: bool = True) -> Dict:
             f["level"] = "known"
     findings.sort(key=lambda f: (-LEVELS.index(f["level"]), -(f["epss"] or 0), f["component"]))
 
-    covered = sum(1 for c in components if c["ecosystem"] == "SwiftURL" and (c.get("version") or c.get("revision")))
+    def checked(c):
+        if c["ecosystem"] == "SwiftURL":
+            return bool(c.get("version") or c.get("revision"))
+        if c["ecosystem"] == "CocoaPods":
+            return bool(c.get("version")) and (use_nvd or bool(c.get("source_url")))
+        return False
     return {
         "components": len(components),
-        "checked": covered,
-        "not_checked": [c["purl"] for c in components if c["ecosystem"] != "SwiftURL"],
+        "checked": sum(1 for c in components if checked(c)),
+        "not_checked": [c["purl"] for c in components if not checked(c)],
         "findings": findings,
         "worst": findings[0]["level"] if findings else "none",
     }
@@ -116,17 +211,20 @@ def check(components: List[Dict], use_epss: bool = True) -> Dict:
 
 def to_markdown(report: Dict, product: str) -> str:
     lines = [f"# cra-scan report — {product}", "",
-             f"{report['components']} components, {report['checked']} checked against OSV; worst level: **{report['worst']}**.", ""]
+             f"{report['components']} components, {report['checked']} checked; worst level: **{report['worst']}**.", ""]
     if report["findings"]:
         lines += ["| Level | Component | Version | Advisory | CVE | EPSS | Fixed in |", "|---|---|---|---|---|---|---|"]
         for f in report["findings"]:
             ep = f"{f['epss']:.3f}" if f["epss"] is not None else ""
-            lines.append(f"| {f['level']} | {f['component']} | {f['version']} | [{f['id']}]({f['url']}) | {', '.join(f['cves'])} | {ep} | {', '.join(f['fixed'])} |")
+            lvl = f["level"] + (" (verify)" if f.get("verify") else "")
+            lines.append(f"| {lvl} | {f['component']} | {f['version']} | [{f['id']}]({f['url']}) | {', '.join(f['cves'])} | {ep} | {', '.join(f['fixed'])} |")
         lines.append("")
+        if any(f.get("verify") for f in report["findings"]):
+            lines += ["(verify) = matched in NVD by product name only; check the CVE really concerns this pod.", ""]
     if report["worst"] == "exploited":
         lines += ["> **Actively exploited vulnerability in a dependency.** If it is exploitable in your product, the CRA",
                   "> Art. 14 clock is running: early warning to ENISA's Single Reporting Platform within 24 hours of awareness,",
                   "> notification within 72 hours, final report within 14 days of a fix. Record the time you became aware.", ""]
     if report["not_checked"]:
-        lines += [f"Not checked (no public advisory feed for this ecosystem yet): {len(report['not_checked'])} component(s).", ""]
+        lines += [f"Not checked (no version or no advisory source): {len(report['not_checked'])} component(s).", ""]
     return "\n".join(lines)

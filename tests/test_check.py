@@ -19,8 +19,10 @@ class CheckTests(unittest.TestCase):
              mock.patch.object(feeds, "osv_details", return_value=OSV), \
              mock.patch.object(feeds, "kev_cves", return_value=kev), \
              mock.patch.object(feeds, "euvd_exploited", return_value=euvd), \
-             mock.patch.object(feeds, "epss", return_value=epss or {"CVE-2022-3215": 0.0065}):
-            return check.check(COMPS)
+             mock.patch.object(feeds, "epss", return_value=epss or {"CVE-2022-3215": 0.0065}), \
+             mock.patch.object(feeds, "pod_spec", return_value={}), \
+             mock.patch.object(feeds, "nvd_by_cpe", return_value=[]):
+            return check.check([dict(c) for c in COMPS])
 
     def test_known(self):
         r = self.run_check()
@@ -28,7 +30,8 @@ class CheckTests(unittest.TestCase):
         f = r["findings"][0]
         self.assertEqual(f["fixed"], ["2.42.0"])
         self.assertEqual(f["cvss"], 5.3)
-        self.assertEqual(r["not_checked"], ["pkg:cocoapods/AFNetworking@2.5.0"])
+        self.assertEqual(r["not_checked"], [])
+        self.assertEqual(r["checked"], 2)
 
     def test_exploited_via_kev(self):
         self.assertEqual(self.run_check(kev={"CVE-2022-3215"})["worst"], "exploited")
@@ -48,6 +51,52 @@ class CheckTests(unittest.TestCase):
     def test_cvss_calc(self):
         self.assertEqual(check._cvss_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8)
         self.assertEqual(check._cvss_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"), 10.0)
+
+
+NVD_AF = [{"id": "CVE-2015-3996", "summary": "AFSecurityPolicy does not validate domain names", "cvss": None,
+           "matches": [{"criteria": "cpe:2.3:a:afnetworking_project:afnetworking:*:*:*:*:*:*:*:*",
+                        "versionEndIncluding": "2.5.2", "vulnerable": True}]}]
+NVD_OTHER = [{"id": "CVE-2099-0001", "summary": "unrelated product with the same name", "cvss": 9.8,
+              "matches": [{"criteria": "cpe:2.3:a:someoneelse:afnetworking:*:*:*:*:*:*:*:*",
+                           "versionEndExcluding": "3.0", "vulnerable": True}]}]
+SPEC = {"source": {"git": "https://github.com/AFNetworking/AFNetworking.git", "tag": "2.5.0"}}
+
+
+class PodTests(unittest.TestCase):
+    def run_pod(self, nvd, kev=set(), use_nvd=True):
+        pods = [dict(COMPS[1])]
+        with mock.patch.object(feeds, "pod_spec", return_value=SPEC), \
+             mock.patch.object(feeds, "osv_query", return_value={}) as osv, \
+             mock.patch.object(feeds, "nvd_by_cpe", side_effect=lambda p, v: nvd if p == "afnetworking" else []), \
+             mock.patch.object(feeds, "kev_cves", return_value=kev), \
+             mock.patch.object(feeds, "euvd_exploited", return_value={}), \
+             mock.patch.object(feeds, "epss", return_value={}):
+            r = check.check(pods, use_nvd=use_nvd)
+            return r, pods, osv
+
+    def test_pod_resolved_to_repo_and_sent_to_osv(self):
+        r, pods, osv = self.run_pod([])
+        self.assertEqual(pods[0]["source_url"], "github.com/AFNetworking/AFNetworking")
+        self.assertEqual(osv.call_args[0][0][0]["source_url"], "github.com/AFNetworking/AFNetworking")
+
+    def test_nvd_vendor_match_counts(self):
+        r, _, _ = self.run_pod(NVD_AF, kev={"CVE-2015-3996"})
+        f = r["findings"][0]
+        self.assertFalse(f["verify"])
+        self.assertEqual(f["level"], "exploited")
+        self.assertEqual(f["source"], "nvd-cpe")
+
+    def test_nvd_name_only_match_capped(self):
+        r, _, _ = self.run_pod(NVD_OTHER, kev={"CVE-2099-0001"})
+        f = r["findings"][0]
+        self.assertTrue(f["verify"])
+        self.assertEqual(f["level"], "known")
+        self.assertEqual(f["fixed"], ["3.0"])
+
+    def test_no_nvd_flag(self):
+        r, _, _ = self.run_pod(NVD_AF, use_nvd=False)
+        self.assertEqual(r["findings"], [])
+        self.assertEqual(r["checked"], 1)   # still checked via OSV, since the repo is known
 
 
 if __name__ == "__main__":

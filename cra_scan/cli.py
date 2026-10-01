@@ -39,14 +39,16 @@ def _print_table(rep: dict, product: str):
     for f in rep["findings"]:
         ep = f" epss={f['epss']:.3f}" if f["epss"] is not None else ""
         fix = f" fixed in {', '.join(f['fixed'])}" if f["fixed"] else ""
-        print(f"  [{f['level'].upper():9}] {f['component']} {f['version']}: {f['id']} {' '.join(f['cves'])}{ep}{fix}")
+        tag = " (verify: name-only NVD match, vendor " + f["cpe_vendor"] + ")" if f.get("verify") else ""
+        ids = " ".join(c for c in f["cves"] if c != f["id"])
+        print(f"  [{f['level'].upper():9}] {f['component']} {f['version']}: {f['id']} {ids}{ep}{fix}{tag}")
         if f["summary"]:
             print(f"              {f['summary'][:110]}")
     if rep["worst"] == "exploited":
         print("\n  ! Actively exploited vulnerability found. If your product is affected, CRA Art. 14 reporting applies:")
         print("    24h early warning / 72h notification via ENISA's Single Reporting Platform. Record when you became aware.")
     if rep["not_checked"]:
-        print(f"  ({len(rep['not_checked'])} non-Swift component(s) listed in the SBOM but not matched: no advisory feed yet)")
+        print(f"  ({len(rep['not_checked'])} component(s) listed in the SBOM but not checked: no pinned version or no advisory source)")
 
 
 def main(argv=None) -> int:
@@ -65,6 +67,7 @@ def main(argv=None) -> int:
             p.add_argument("--format", choices=["table", "json", "markdown"], default="table")
             p.add_argument("--fail-on", choices=["exploited", "high", "known", "never"], default="exploited")
             p.add_argument("--no-epss", action="store_true")
+            p.add_argument("--no-nvd", action="store_true", help="skip NVD look-ups for CocoaPods pods")
     a = ap.parse_args(argv)
 
     if not os.path.exists(a.path):
@@ -76,6 +79,11 @@ def main(argv=None) -> int:
         return 2
     product = _product_name(a.path, a.product)
 
+    if a.cmd == "scan":
+        try:   # put each pod's source repo into the SBOM too
+            checker.resolve_pods(comps)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
     if a.cmd in ("sbom", "scan"):
         bom = sbom.build_sbom(comps, product, a.product_version, a.supplier)
         text = json.dumps(bom, indent=2)
@@ -89,7 +97,7 @@ def main(argv=None) -> int:
             return 0
 
     try:
-        rep = checker.check(comps, use_epss=not a.no_epss)
+        rep = checker.check(comps, use_epss=not a.no_epss, use_nvd=not a.no_nvd)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         print(f"cra-scan: could not reach a vulnerability feed: {e}", file=sys.stderr)
         return 3
