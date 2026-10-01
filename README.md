@@ -13,7 +13,7 @@ The open-source core of [Pinwatch](https://pinwatch.dev).
 ## Install & run
 
 ```bash
-pipx install cra-scan            # once published; until then: python3 -m cra_scan from this folder
+pipx install cra-scan            # or: pip install cra-scan
 cra-scan scan path/to/MyApp --product "My App" --product-version 1.4 --supplier "My Studio"
 cra-scan check sbom.cdx.json --format markdown    # re-check an existing SBOM
 ```

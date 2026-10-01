@@ -9,8 +9,24 @@ description = "SBOM and exploited-vulnerability check for Swift / Apple-platform
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
+keywords = ["cyber resilience act", "CRA", "SBOM", "CycloneDX", "swift", "swiftpm", "cocoapods", "vulnerability", "OSV", "KEV", "EUVD"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+]
 authors = [{name = "Georgios Stavropoulos"}]
 dependencies = []
+
+[project.urls]
+Homepage = "https://pinwatch.dev"
+Source = "https://github.com/stavrop/cra-scan"
+Issues = "https://github.com/stavrop/cra-scan/issues"
 
 [project.scripts]
 cra-scan = "cra_scan.cli:main"
