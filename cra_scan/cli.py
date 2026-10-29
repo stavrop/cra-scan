@@ -47,6 +47,8 @@ def _print_table(rep: dict, product: str):
     if rep["worst"] == "exploited":
         print("\n  ! Actively exploited vulnerability found. If your product is affected, CRA Art. 14 reporting applies:")
         print("    24h early warning / 72h notification via ENISA's Single Reporting Platform. Record when you became aware.")
+    if rep.get("stale_feeds"):
+        print(f"  (feed unreachable, expired cache used: {', '.join(rep['stale_feeds'])})")
     if rep["not_checked"]:
         print(f"  ({len(rep['not_checked'])} component(s) listed in the SBOM but not checked: no pinned version or no advisory source)")
 

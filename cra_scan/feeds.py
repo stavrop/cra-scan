@@ -9,6 +9,10 @@
 
 KEV and EUVD lists are cached on disk (default 12 h) so CI runs stay fast. Podspecs are cached
 for 30 days and NVD answers for 24 h. Set NVD_API_KEY to raise NVD's rate limit (5 → 50 requests / 30 s).
+
+Requests are retried with backoff on 403/408/429/5xx and network errors (CDNs and NVD's rate limit
+answer with 403). If a cached feed still cannot be refreshed, a copy up to 7 days old is used and the
+report lists it under "stale_feeds"; otherwise FeedError names the URL that failed.
 """
 from __future__ import annotations
 
@@ -41,21 +45,62 @@ def cache_dir() -> str:
     return d
 
 
+class FeedError(OSError):
+    """A feed request failed; the message names the URL (query string dropped)."""
+
+    def __init__(self, url: str, reason: str, code: Optional[int] = None):
+        self.url, self.code = url.split("?")[0], code
+        super().__init__(f"{self.url}: {reason}")
+
+
+RETRY_CODES = {403, 408, 429, 500, 502, 503, 504}
+ATTEMPTS = 3
+STALE_MAX_H = 7 * 24
+STALE: List[str] = []      # cached feeds used past their max age in this run; check() reports them
+_sleep = time.sleep
+
+
+def _retry_after(e: urllib.error.HTTPError) -> Optional[float]:
+    v = e.headers.get("Retry-After") if e.headers else None
+    return float(v) if v and v.strip().isdigit() else None
+
+
 def _http(url: str, data: Optional[dict] = None, timeout: int = 30, headers: Optional[dict] = None):
     body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(url, data=body, headers={"User-Agent": UA, "Accept": "application/json",
                                                           **({"Content-Type": "application/json"} if body else {}),
                                                           **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    for attempt in range(1, ATTEMPTS + 1):
+        delay = None
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code not in RETRY_CODES:
+                raise FeedError(url, f"HTTP {e.code} {e.reason}", e.code) from e
+            err, delay = FeedError(url, f"HTTP {e.code} {e.reason} ({attempt} attempt(s))", e.code), _retry_after(e)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            err = FeedError(url, f"{getattr(e, 'reason', None) or e} ({attempt} attempt(s))")
+        if attempt < ATTEMPTS:
+            _sleep(min(delay if delay is not None else 2 ** attempt, 30))
+    raise err
 
 
 def _cached(name: str, max_age_h: float, loader):
     path = os.path.join(cache_dir(), name)
-    if os.path.exists(path) and time.time() - os.path.getmtime(path) < max_age_h * 3600:
+    age_h = (time.time() - os.path.getmtime(path)) / 3600 if os.path.exists(path) else None
+    if age_h is not None and age_h < max_age_h:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    data = loader()
+    try:
+        data = loader()
+    except FeedError as e:
+        if age_h is None or age_h > STALE_MAX_H:
+            raise
+        print(f"cra-scan: {e}; using cached {name} from {age_h:.0f} h ago", file=sys.stderr)
+        STALE.append(f"{name} ({age_h:.0f} h old)")
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
@@ -139,7 +184,7 @@ def pod_spec(name: str, version: str) -> Dict:
     def load():
         try:
             return _http(url, timeout=20)
-        except urllib.error.HTTPError as e:
+        except FeedError as e:
             if e.code == 404:
                 return {}
             raise

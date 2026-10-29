@@ -134,6 +134,7 @@ def _nvd_findings(c: Dict, known_cves: set) -> List[Dict]:
 
 
 def check(components: List[Dict], use_epss: bool = True, use_nvd: bool = True) -> Dict:
+    feeds.STALE.clear()
     pods = [c for c in components if c["ecosystem"] == "CocoaPods" and c.get("version")]
     if pods:
         feeds.progress(f"cra-scan: resolving {len(pods)} pod(s) to their source repositories…")
@@ -206,6 +207,7 @@ def check(components: List[Dict], use_epss: bool = True, use_nvd: bool = True) -
         "not_checked": [c["purl"] for c in components if not checked(c)],
         "findings": findings,
         "worst": findings[0]["level"] if findings else "none",
+        "stale_feeds": list(feeds.STALE),
     }
 
 
@@ -225,6 +227,8 @@ def to_markdown(report: Dict, product: str) -> str:
         lines += ["> **Actively exploited vulnerability in a dependency.** If it is exploitable in your product, the CRA",
                   "> Art. 14 clock is running: early warning to ENISA's Single Reporting Platform within 24 hours of awareness,",
                   "> notification within 72 hours, final report within 14 days of a fix. Record the time you became aware.", ""]
+    if report.get("stale_feeds"):
+        lines += [f"Feed unreachable, expired cache used: {', '.join(report['stale_feeds'])}.", ""]
     if report["not_checked"]:
         lines += [f"Not checked (no version or no advisory source): {len(report['not_checked'])} component(s).", ""]
     return "\n".join(lines)

@@ -53,6 +53,9 @@ cra-scan 0.2.0 · Demo: 8 components, 8 checked, worst: EXPLOITED
 - Pods from a `:git` or `:path` source, Carthage and binary frameworks are listed in the SBOM only.
 
 Feeds are cached in `~/.cache/cra-scan` (`CRA_SCAN_CACHE` overrides): KEV/EUVD 12 h, NVD 24 h, podspecs 30 days.
+Feed requests are retried with backoff on 403/408/429/5xx and network errors. If a feed stays unreachable, an expired
+cached copy up to 7 days old is used and listed under `stale_feeds` in the report; without one, exit code `3` names the
+URL that failed. Keep the cache between CI runs to get this fallback.
 
 ## GitHub Action
 

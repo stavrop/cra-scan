@@ -31,6 +31,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(f["fixed"], ["2.42.0"])
         self.assertEqual(f["cvss"], 5.3)
         self.assertEqual(r["not_checked"], [])
+        self.assertEqual(r["stale_feeds"], [])
         self.assertEqual(r["checked"], 2)
 
     def test_exploited_via_kev(self):
